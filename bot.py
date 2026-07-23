@@ -3,6 +3,8 @@ import json
 import requests
 import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Webhook URLs from GitHub Secrets
 WEBHOOKS = {
@@ -25,9 +27,20 @@ def save_history(history):
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=4)
 
+def get_session():
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    })
+    return session
+
 def convert_pdf_to_image(pdf_url, output_image_path="notice.png"):
     try:
-        response = requests.get(pdf_url, timeout=15)
+        session = get_session()
+        response = session.get(pdf_url, timeout=30)
         if response.status_code == 200:
             doc = fitz.open(stream=response.content, filetype="pdf")
             page = doc[0]  # Render page 1
@@ -61,7 +74,7 @@ def send_to_discord(webhook_url, title, pdf_url, image_path=None):
 
 def get_category_webhook(title):
     title_lower = title.lower()
-    if any(k in title_lower for k in ["exam", "routine", "centre"]):
+    if any(k in title_lower for k in ["exam", "routine", "centre", "fill-up"]):
         return WEBHOOKS["exam"]
     elif any(k in title_lower for k in ["admission", "apply", "merit"]):
         return WEBHOOKS["admission"]
@@ -73,11 +86,12 @@ def get_category_webhook(title):
 
 def check_nu_notices():
     url = "https://www.nu.ac.bd/recent-news-notice.php"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    session = get_session()
     
     try:
-        res = requests.get(url, headers=headers, timeout=15)
+        res = session.get(url, timeout=30)
         if res.status_code != 200:
+            print(f"Failed connection. Status: {res.status_code}")
             return
 
         soup = BeautifulSoup(res.content, "html.parser")
@@ -100,7 +114,6 @@ def check_nu_notices():
             print(f"New Notice Found: {title}")
             webhook_url = get_category_webhook(title)
 
-            # Convert PDF 1st page to Image
             has_image = convert_pdf_to_image(pdf_link)
             image_path = "notice.png" if has_image else None
 
