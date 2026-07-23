@@ -5,7 +5,6 @@ import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 import urllib3
 
-# Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Webhook URLs from GitHub Secrets
@@ -29,23 +28,6 @@ def save_history(history):
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=4)
 
-def send_test_message():
-    """Sends an initial verification message to Discord"""
-    history = load_history()
-    if "TEST_COMPLETED" not in history:
-        target_webhook = WEBHOOKS["notice"] or WEBHOOKS["exam"]
-        if target_webhook:
-            payload = {
-                "embeds": [{
-                    "title": "🎉 NU Central Desk Bot Successfully Connected!",
-                    "description": "Your bot is now live and linked to Discord. New notices from NU will be posted here automatically.",
-                    "color": 5763719
-                }]
-            }
-            requests.post(target_webhook, json=payload)
-            history.append("TEST_COMPLETED")
-            save_history(history)
-
 def convert_pdf_to_image(pdf_url, output_image_path="notice.png"):
     try:
         headers = {
@@ -54,7 +36,7 @@ def convert_pdf_to_image(pdf_url, output_image_path="notice.png"):
         response = requests.get(pdf_url, headers=headers, timeout=25, verify=False)
         if response.status_code == 200:
             doc = fitz.open(stream=response.content, filetype="pdf")
-            page = doc[0]  # First page
+            page = doc[0]  # Render page 1
             pix = page.get_pixmap(dpi=150)
             pix.save(output_image_path)
             return True
@@ -64,41 +46,57 @@ def convert_pdf_to_image(pdf_url, output_image_path="notice.png"):
 
 def send_to_discord(webhook_url, title, pdf_url, image_path=None):
     if not webhook_url:
-        print("Webhook URL missing.")
+        print(f"⚠️ Webhook URL missing for notice: {title[:30]}")
+        # Fallback to notice or exam webhook if missing
+        webhook_url = WEBHOOKS["notice"] or WEBHOOKS["exam"]
+
+    if not webhook_url:
+        print("❌ No valid Webhook URL found at all!")
         return
 
     payload = {
         "embeds": [{
             "title": title,
-            "description": f"📄 [Download Official PDF Notice]({pdf_url})",
+            "description": f"📄 [অফিশিয়াল নোটিশ (PDF) ডাউনলোড করুন]({pdf_url})",
             "color": 3447003
         }]
     }
 
-    if image_path and os.path.exists(image_path):
-        payload["embeds"][0]["image"] = {"url": "attachment://notice.png"}
-        with open(image_path, "rb") as f:
-            files = {"file": ("notice.png", f, "image/png")}
-            requests.post(webhook_url, data={"payload_json": json.dumps(payload)}, files=files)
-    else:
-        requests.post(webhook_url, json=payload)
+    try:
+        if image_path and os.path.exists(image_path):
+            payload["embeds"][0]["image"] = {"url": "attachment://notice.png"}
+            with open(image_path, "rb") as f:
+                files = {"file": ("notice.png", f, "image/png")}
+                res = requests.post(webhook_url, data={"payload_json": json.dumps(payload)}, files=files)
+        else:
+            res = requests.post(webhook_url, json=payload)
+            
+        print(f"Discord Response Code: {res.status_code} for '{title[:25]}...'")
+    except Exception as e:
+        print(f"Error sending to Discord: {e}")
 
 def get_category_webhook(title):
     title_lower = title.lower()
-    if any(k in title_lower for k in ["exam", "routine", "centre", "fill-up", "degree", "honours", "master"]):
-        return WEBHOOKS["exam"]
-    elif any(k in title_lower for k in ["admission", "apply", "merit", "release"]):
-        return WEBHOOKS["admission"]
-    elif any(k in title_lower for k in ["result", "mark", "gpa"]):
-        return WEBHOOKS["results"]
-    elif any(k in title_lower for k in ["news", "press"]):
-        return WEBHOOKS["news"]
+    
+    # Bengali & English Keyword Detection for Exams/Routines
+    if any(k in title_lower for k in ["পরীক্ষা", "ইনকোর্স", "রুটিন", "কেন্দ্র", "ডিগ্রী", "অনার্স", "মাষ্টার্স", "ফর্ম পূরণ", "exam", "routine"]):
+        return WEBHOOKS["exam"] or WEBHOOKS["notice"]
+        
+    # Admission Keywords
+    elif any(k in title_lower for k in ["ভর্তি", "মেধা তালিকা", "রিলিজ স্লিপ", "আবেদন", "admission", "apply"]):
+        return WEBHOOKS["admission"] or WEBHOOKS["notice"]
+        
+    # Results Keywords
+    elif any(k in title_lower for k in ["ফলাফল", "রেজাল্ট", "সিজিপিএ", "মার্ক", "result", "gpa"]):
+        return WEBHOOKS["results"] or WEBHOOKS["notice"]
+        
+    # News/Press Keywords
+    elif any(k in title_lower for k in ["সংবাদ", "প্রেস", "প্রতিবেদন", "news", "press"]):
+        return WEBHOOKS["news"] or WEBHOOKS["notice"]
+        
     return WEBHOOKS["notice"] or WEBHOOKS["exam"]
 
 def check_nu_notices():
-    # Send instant verification test message
-    send_test_message()
-
     url = "https://www.nu.ac.bd/recent-news-notice.php"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -113,9 +111,11 @@ def check_nu_notices():
 
         soup = BeautifulSoup(res.content, "html.parser")
         rows = soup.select("table tr")
-        history = load_history()
+        
+        # Fresh fetch list
+        history = []
 
-        for row in reversed(rows[:10]):
+        for row in reversed(rows[:8]):
             link = row.find("a")
             if not link or "href" not in link.attrs:
                 continue
@@ -125,10 +125,7 @@ def check_nu_notices():
             if not pdf_link.startswith("http"):
                 pdf_link = "https://www.nu.ac.bd/" + pdf_link.lstrip("/")
 
-            if pdf_link in history:
-                continue
-
-            print(f"New Notice Found: {title}")
+            print(f"Processing Notice: {title[:40]}...")
             webhook_url = get_category_webhook(title)
 
             has_image = convert_pdf_to_image(pdf_link)
