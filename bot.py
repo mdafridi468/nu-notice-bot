@@ -3,8 +3,10 @@ import json
 import requests
 import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Webhook URLs from GitHub Secrets
 WEBHOOKS = {
@@ -27,23 +29,32 @@ def save_history(history):
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=4)
 
-def get_session():
-    session = requests.Session()
-    retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    })
-    return session
+def send_test_message():
+    """Sends an initial verification message to Discord"""
+    history = load_history()
+    if "TEST_COMPLETED" not in history:
+        target_webhook = WEBHOOKS["notice"] or WEBHOOKS["exam"]
+        if target_webhook:
+            payload = {
+                "embeds": [{
+                    "title": "🎉 NU Central Desk Bot Successfully Connected!",
+                    "description": "Your bot is now live and linked to Discord. New notices from NU will be posted here automatically.",
+                    "color": 5763719
+                }]
+            }
+            requests.post(target_webhook, json=payload)
+            history.append("TEST_COMPLETED")
+            save_history(history)
 
 def convert_pdf_to_image(pdf_url, output_image_path="notice.png"):
     try:
-        session = get_session()
-        response = session.get(pdf_url, timeout=30)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(pdf_url, headers=headers, timeout=25, verify=False)
         if response.status_code == 200:
             doc = fitz.open(stream=response.content, filetype="pdf")
-            page = doc[0]  # Render page 1
+            page = doc[0]  # First page
             pix = page.get_pixmap(dpi=150)
             pix.save(output_image_path)
             return True
@@ -74,24 +85,30 @@ def send_to_discord(webhook_url, title, pdf_url, image_path=None):
 
 def get_category_webhook(title):
     title_lower = title.lower()
-    if any(k in title_lower for k in ["exam", "routine", "centre", "fill-up"]):
+    if any(k in title_lower for k in ["exam", "routine", "centre", "fill-up", "degree", "honours", "master"]):
         return WEBHOOKS["exam"]
-    elif any(k in title_lower for k in ["admission", "apply", "merit"]):
+    elif any(k in title_lower for k in ["admission", "apply", "merit", "release"]):
         return WEBHOOKS["admission"]
     elif any(k in title_lower for k in ["result", "mark", "gpa"]):
         return WEBHOOKS["results"]
     elif any(k in title_lower for k in ["news", "press"]):
         return WEBHOOKS["news"]
-    return WEBHOOKS["notice"]
+    return WEBHOOKS["notice"] or WEBHOOKS["exam"]
 
 def check_nu_notices():
+    # Send instant verification test message
+    send_test_message()
+
     url = "https://www.nu.ac.bd/recent-news-notice.php"
-    session = get_session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
     
     try:
-        res = session.get(url, timeout=30)
+        res = requests.get(url, headers=headers, timeout=25, verify=False)
         if res.status_code != 200:
-            print(f"Failed connection. Status: {res.status_code}")
+            print(f"Failed connection to NU Website. Status code: {res.status_code}")
             return
 
         soup = BeautifulSoup(res.content, "html.parser")
